@@ -13,13 +13,14 @@ type SessionInfo struct {
 type Peer struct {
 	IP string `json:"ip"`
 }
+
 type Session struct {
 	peers [2]Peer
+	ready chan struct{}
 }
 
 func main() {
 	r := gin.Default()
-
 	sessions := map[string]Session{}
 
 	r.POST("/session/:id", func(c *gin.Context) {
@@ -27,28 +28,34 @@ func main() {
 		sessionId := c.Param("id")
 		fmt.Println("Creating session with id: ", sessionId)
 
-		// server receives udp_addr from client (get by stun server)
-
 		c.BindJSON(&sessionInfo)
+
 		session, exists := sessions[sessionId]
 		if !exists {
-			// [0]
 			sessions[sessionId] = Session{
 				peers: [2]Peer{
 					{IP: sessionInfo.UdpAddr},
 				},
+				ready: make(chan struct{}),
 			}
-		} else {
-			// [1]
-			session.peers[1] = Peer{IP: sessionInfo.UdpAddr}
-			sessions[sessionId] = session
+			<-sessions[sessionId].ready
+			updatedSession := sessions[sessionId]
+			delete(sessions, sessionId)
+			c.JSON(200, gin.H{"peer": updatedSession.peers[1].IP})
+			return
 		}
-		fmt.Printf("Received session info: %+v\n", sessionInfo)
-		c.JSON(200, gin.H{
-			"message": "Session created",
-			"id":      sessionId,
-			"peers":   sessions[sessionId].peers,
-		})
+
+		if session.peers[1].IP != "" {
+			c.JSON(400, gin.H{"error": "session already full"})
+			return
+		}
+
+		session.peers[1] = Peer{IP: sessionInfo.UdpAddr}
+		sessions[sessionId] = session
+		close(session.ready)
+
+		fmt.Printf("Session completed: %+v\n", session)
+		c.JSON(200, gin.H{"peer": session.peers[0].IP})
 	})
 
 	r.GET("/", func(c *gin.Context) {
@@ -57,10 +64,8 @@ func main() {
 			"message":  "Test",
 			"clientIP": clientIP,
 		})
-		fmt.Println("Route accessed")
-		fmt.Println(clientIP)
 	})
 
+	fmt.Println("Rendezvous rodando em :8000")
 	r.Run(":8000")
-	fmt.Println("Running on http://localhost:8000")
 }
