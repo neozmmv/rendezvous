@@ -66,6 +66,6 @@ func main() {
 		})
 	})
 
-	fmt.Println("Rendezvous rodando em :8000")
+	fmt.Println("Server: http://localhost:8000")
 	r.Run(":8000")
 }

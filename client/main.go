@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net"
 	"net/http"
+	"time"
 
 	"github.com/pion/stun"
 )
@@ -76,6 +77,38 @@ func main() {
 		panic(err)
 	}
 
+	peerAddr, err := net.ResolveUDPAddr("udp", respBody["peer"])
+	if err != nil {
+		panic(err)
+	}
+
 	fmt.Printf("Listening on %s\n", conn.LocalAddr().String())
 	fmt.Printf("Peer address: %v", respBody["peer"])
+
+	connected := make(chan struct{})
+
+	go punchHole(conn, peerAddr)
+	go readFromPeer(conn, connected)
+	<-connected
+}
+
+func punchHole(conn *net.UDPConn, peerAddr *net.UDPAddr) {
+	for i := 0; i < 50; i++ {
+		conn.WriteToUDP([]byte("punch"), peerAddr)
+		time.Sleep(100 * time.Millisecond)
+	}
+}
+
+func readFromPeer(conn *net.UDPConn, connected chan struct{}) {
+	buf := make([]byte, 1024)
+	for {
+		n, addr, err := conn.ReadFromUDP(buf)
+		if err != nil {
+			fmt.Println("Error reading from peer: ", err)
+			continue
+		}
+		fmt.Printf("Received message from %s: %s\n", addr.String(), string(buf[:n]))
+		close(connected)
+		return
+	}
 }
