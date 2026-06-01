@@ -1,11 +1,13 @@
 package main
 
 import (
+	"bufio"
 	"bytes"
 	"encoding/json"
 	"fmt"
 	"net"
 	"net/http"
+	"os"
 	"time"
 
 	"github.com/pion/stun"
@@ -83,13 +85,16 @@ func main() {
 	}
 
 	fmt.Printf("Listening on %s\n", conn.LocalAddr().String())
-	fmt.Printf("Peer address: %v", respBody["peer"])
+	fmt.Printf("Peer address: %v\n", respBody["peer"])
 
 	connected := make(chan struct{})
 
 	go punchHole(conn, peerAddr)
-	go readFromPeer(conn, connected)
+	go waitForPunch(conn, connected)
 	<-connected
+	go readFromPeer(conn)
+	go sendToPeer(conn, peerAddr)
+	select {}
 }
 
 func punchHole(conn *net.UDPConn, peerAddr *net.UDPAddr) {
@@ -99,7 +104,7 @@ func punchHole(conn *net.UDPConn, peerAddr *net.UDPAddr) {
 	}
 }
 
-func readFromPeer(conn *net.UDPConn, connected chan struct{}) {
+func readFromPeer(conn *net.UDPConn) {
 	buf := make([]byte, 1024)
 	for {
 		n, addr, err := conn.ReadFromUDP(buf)
@@ -107,8 +112,36 @@ func readFromPeer(conn *net.UDPConn, connected chan struct{}) {
 			fmt.Println("Error reading from peer: ", err)
 			continue
 		}
+		if string(buf[:n]) == "punch" {
+			continue
+		}
 		fmt.Printf("Received message from %s: %s\n", addr.String(), string(buf[:n]))
-		close(connected)
+	}
+}
+
+func sendToPeer(conn *net.UDPConn, peerAddr *net.UDPAddr) {
+	scanner := bufio.NewScanner(os.Stdin)
+	if scanner.Err() != nil {
+		fmt.Println("Error reading from stdin: ", scanner.Err())
 		return
+	}
+	for scanner.Scan() {
+		conn.WriteToUDP([]byte(scanner.Text()), peerAddr)
+	}
+}
+
+func waitForPunch(conn *net.UDPConn, connected chan struct{}) {
+	// waits for punch and closes the connected channel when it receives a punch
+	buf := make([]byte, 1024)
+	for {
+		n, _, err := conn.ReadFromUDP(buf)
+		if err != nil {
+			fmt.Println("Error reading from peer: ", err)
+			continue
+		}
+		if string(buf[:n]) == "punch" {
+			close(connected)
+			return
+		}
 	}
 }
