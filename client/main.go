@@ -19,7 +19,7 @@ var lastSeen time.Time
 func main() {
 	var hostname string
 	var session string
-	fmt.Print("Enter hostname: ")
+	fmt.Print("Enter hostname (blank for default): ")
 	fmt.Scanln(&hostname)
 	fmt.Print("Enter session: ")
 	fmt.Scanln(&session)
@@ -29,7 +29,10 @@ func main() {
 		hostname = hostname[:len(hostname)-1]
 	}
 
-	if !strings.HasPrefix(hostname, "http://") && !strings.HasPrefix(hostname, "https://") {
+	if hostname == "" {
+		// fallback to default hostname if none provided
+		hostname = "https://rendezvous.enzogp.dev"
+	} else if !strings.HasPrefix(hostname, "http://") && !strings.HasPrefix(hostname, "https://") {
 		hostname = "https://" + hostname
 	}
 
