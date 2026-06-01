@@ -1,0 +1,10 @@
+services:
+  rendezvous:
+    build: .
+    ports:
+      - "8000:8000"
+  cloudflare:
+    image: cloudflare/cloudflared:latest
+    command: tunnel --url http://rendezvous:8000
+    depends_on:
+      - rendezvous
