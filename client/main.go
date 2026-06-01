@@ -94,7 +94,8 @@ func main() {
 	<-connected
 	go readFromPeer(conn)
 	go sendToPeer(conn, peerAddr)
-	select {}
+	go keepAlive(conn, peerAddr)
+	select {} // keeps main from exiting
 }
 
 func punchHole(conn *net.UDPConn, peerAddr *net.UDPAddr) {
@@ -112,7 +113,7 @@ func readFromPeer(conn *net.UDPConn) {
 			fmt.Println("Error reading from peer: ", err)
 			continue
 		}
-		if string(buf[:n]) == "punch" {
+		if string(buf[:n]) == "punch" || string(buf[:n]) == "keepalive" {
 			continue
 		}
 		fmt.Printf("Received message from %s: %s\n", addr.String(), string(buf[:n]))
@@ -143,5 +144,13 @@ func waitForPunch(conn *net.UDPConn, connected chan struct{}) {
 			close(connected)
 			return
 		}
+	}
+}
+
+func keepAlive(conn *net.UDPConn, peerAddr *net.UDPAddr) {
+	interval := 10 * time.Second
+	for {
+		time.Sleep(interval)
+		conn.WriteToUDP([]byte("keepalive"), peerAddr)
 	}
 }
