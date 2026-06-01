@@ -8,6 +8,7 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/pion/stun"
@@ -26,6 +27,10 @@ func main() {
 	// remove trailing slash if exists
 	if hostname[len(hostname)-1] == '/' {
 		hostname = hostname[:len(hostname)-1]
+	}
+
+	if !strings.HasPrefix(hostname, "http://") && !strings.HasPrefix(hostname, "https://") {
+		hostname = "https://" + hostname
 	}
 
 	// open a UDP connection on a random port
