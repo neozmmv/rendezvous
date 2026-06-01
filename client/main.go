@@ -16,6 +16,8 @@ import (
 
 var lastSeen time.Time
 
+var Version = "dev"
+
 func main() {
 	var hostname string
 	var session string

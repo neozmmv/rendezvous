@@ -31,6 +31,18 @@ type SecretSession struct {
 	session  Session
 }
 
+// add support for version later
+/* func getVersion() string {
+	info, ok := debug.ReadBuildInfo()
+	if !ok {
+		return "dev"
+	}
+	return info.Main.Version
+}
+*/
+
+var Version = "dev"
+
 func main() {
 	r := gin.Default()
 	sessions := map[string]Session{}
