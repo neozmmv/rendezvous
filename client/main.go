@@ -25,7 +25,7 @@ func main() {
 	fmt.Scanln(&session)
 
 	// remove trailing slash if exists
-	if hostname[len(hostname)-1] == '/' {
+	if hostname != "" && hostname[len(hostname)-1] == '/' {
 		hostname = hostname[:len(hostname)-1]
 	}
 
