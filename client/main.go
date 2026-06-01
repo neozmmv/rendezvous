@@ -19,10 +19,24 @@ var lastSeen time.Time
 func main() {
 	var hostname string
 	var session string
+	var passwordInput string
+	var createOrJoin string
 	fmt.Print("Enter hostname (blank for default): ")
 	fmt.Scanln(&hostname)
+	fmt.Print("Create or join session? (c/j): ")
+	fmt.Scanln(&createOrJoin)
 	fmt.Print("Enter session: ")
 	fmt.Scanln(&session)
+	fmt.Print("Does the session require a password? (y/n): ")
+	fmt.Scanln(&passwordInput)
+	requiresPassword := strings.ToLower(passwordInput) == "y"
+	create := strings.ToLower(createOrJoin) == "c"
+
+	var password string
+	if requiresPassword {
+		fmt.Print("Enter password: ")
+		fmt.Scanln(&password)
+	}
 
 	// remove trailing slash if exists
 	if hostname != "" && hostname[len(hostname)-1] == '/' {
@@ -42,6 +56,30 @@ func main() {
 		panic(err)
 	}
 	defer conn.Close()
+
+	if create && requiresPassword {
+		createBody := map[string]string{
+			"id":       session,
+			"password": password,
+		}
+		createJson, _ := json.Marshal(createBody)
+		createResp, err := http.Post(
+			fmt.Sprintf("%s/create_session", hostname),
+			"application/json",
+			bytes.NewBuffer(createJson),
+		)
+		if err != nil {
+			panic(err)
+		}
+		defer createResp.Body.Close()
+		var createRespBody map[string]string
+		json.NewDecoder(createResp.Body).Decode(&createRespBody)
+		if createRespBody["error"] != "" {
+			fmt.Println("Error creating session:", createRespBody["error"])
+			os.Exit(1)
+		}
+		fmt.Println("Session created! Waiting for peer...")
+	}
 
 	// google stun server
 	serverAddr, err := net.ResolveUDPAddr("udp", "stun.l.google.com:19302")
@@ -70,13 +108,25 @@ func main() {
 	fmt.Printf("Public addr: %s:%d\n", xorAddr.IP, xorAddr.Port)
 
 	// post body
-	body := map[string]string{
+	var body map[string]string
+	body = map[string]string{
 		"udp_addr": fmt.Sprintf("%s:%d", xorAddr.IP, xorAddr.Port),
 	}
 
+	var endpoint string
+
+	if requiresPassword {
+		body = map[string]string{
+			"udp_addr": fmt.Sprintf("%s:%d", xorAddr.IP, xorAddr.Port),
+			"password": password,
+		}
+		endpoint = fmt.Sprintf("%s/join_session/%s", hostname, session)
+	} else {
+		endpoint = fmt.Sprintf("%s/session/%s", hostname, session)
+	}
 	bodyJson, err := json.Marshal(body)
 
-	resp, err := http.Post(fmt.Sprintf("%s/session/%s", hostname, session), "application/json", bytes.NewBuffer(bodyJson))
+	resp, err := http.Post(endpoint, "application/json", bytes.NewBuffer(bodyJson))
 	if err != nil {
 		panic(err)
 	}
@@ -87,6 +137,11 @@ func main() {
 	err = json.NewDecoder(resp.Body).Decode(&respBody)
 	if err != nil {
 		panic(err)
+	}
+
+	if respBody["error"] != "" {
+		fmt.Println("Error: ", respBody["error"])
+		os.Exit(1)
 	}
 
 	peerAddr, err := net.ResolveUDPAddr("udp", respBody["peer"])
