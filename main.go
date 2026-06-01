@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"sync"
 
 	"github.com/gin-gonic/gin"
 )
@@ -23,6 +24,8 @@ func main() {
 	r := gin.Default()
 	sessions := map[string]Session{}
 
+	var mu sync.Mutex
+
 	r.POST("/session/:id", func(c *gin.Context) {
 		var sessionInfo SessionInfo
 		sessionId := c.Param("id")
@@ -30,6 +33,7 @@ func main() {
 
 		c.BindJSON(&sessionInfo)
 
+		mu.Lock()
 		session, exists := sessions[sessionId]
 		if !exists {
 			sessions[sessionId] = Session{
@@ -38,6 +42,7 @@ func main() {
 				},
 				ready: make(chan struct{}),
 			}
+			mu.Unlock()
 			<-sessions[sessionId].ready
 			updatedSession := sessions[sessionId]
 			delete(sessions, sessionId)
@@ -46,6 +51,7 @@ func main() {
 		}
 
 		if session.peers[1].IP != "" {
+			mu.Unlock()
 			c.JSON(400, gin.H{"error": "session already full"})
 			return
 		}
@@ -53,7 +59,7 @@ func main() {
 		session.peers[1] = Peer{IP: sessionInfo.UdpAddr}
 		sessions[sessionId] = session
 		close(session.ready)
-
+		mu.Unlock()
 		fmt.Printf("Session completed: %+v\n", session)
 		c.JSON(200, gin.H{"peer": session.peers[0].IP})
 	})

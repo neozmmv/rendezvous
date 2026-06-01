@@ -13,6 +13,8 @@ import (
 	"github.com/pion/stun"
 )
 
+var lastSeen time.Time
+
 func main() {
 	var hostname string
 	var session string
@@ -95,6 +97,7 @@ func main() {
 	go readFromPeer(conn)
 	go sendToPeer(conn, peerAddr)
 	go keepAlive(conn, peerAddr)
+	go watchConnection()
 	select {} // keeps main from exiting
 }
 
@@ -113,7 +116,11 @@ func readFromPeer(conn *net.UDPConn) {
 			fmt.Println("Error reading from peer: ", err)
 			continue
 		}
-		if string(buf[:n]) == "punch" || string(buf[:n]) == "keepalive" {
+		if string(buf[:n]) == "punch" {
+			continue
+		}
+		if string(buf[:n]) == "keepalive" {
+			lastSeen = time.Now()
 			continue
 		}
 		fmt.Printf("Received message from %s: %s\n", addr.String(), string(buf[:n]))
@@ -152,5 +159,16 @@ func keepAlive(conn *net.UDPConn, peerAddr *net.UDPAddr) {
 	for {
 		time.Sleep(interval)
 		conn.WriteToUDP([]byte("keepalive"), peerAddr)
+	}
+}
+
+func watchConnection() {
+	// if no keepalive received for 30 seconds, assume connection is dead and exit
+	for {
+		time.Sleep(30 * time.Second)
+		if time.Since(lastSeen) > 30*time.Second {
+			fmt.Println("Connection lost, exiting...")
+			os.Exit(0)
+		}
 	}
 }
