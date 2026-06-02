@@ -9,16 +9,19 @@ import (
 )
 
 type SessionInfo struct {
-	UdpAddr string `json:"udp_addr"`
+	UdpAddr   string `json:"udp_addr"`
+	LocalAddr string `json:"local_addr"`
 }
 
 type SessionInfoWithPassword struct {
-	UdpAddr  string `json:"udp_addr"`
-	Password string `json:"password"`
+	UdpAddr   string `json:"udp_addr"`
+	LocalAddr string `json:"local_addr"`
+	Password  string `json:"password"`
 }
 
 type Peer struct {
-	IP string `json:"ip"`
+	IP        string `json:"ip"`
+	LocalAddr string `json:"local_addr"`
 }
 
 type Session struct {
@@ -30,16 +33,6 @@ type SecretSession struct {
 	password string
 	session  Session
 }
-
-// add support for version later
-/* func getVersion() string {
-	info, ok := debug.ReadBuildInfo()
-	if !ok {
-		return "dev"
-	}
-	return info.Main.Version
-}
-*/
 
 var Version = "dev"
 
@@ -62,7 +55,7 @@ func main() {
 		if !exists {
 			sessions[sessionId] = Session{
 				peers: [2]Peer{
-					{IP: sessionInfo.UdpAddr},
+					{IP: sessionInfo.UdpAddr, LocalAddr: sessionInfo.LocalAddr},
 				},
 				ready: make(chan struct{}),
 			}
@@ -70,7 +63,10 @@ func main() {
 			<-sessions[sessionId].ready
 			updatedSession := sessions[sessionId]
 			delete(sessions, sessionId)
-			c.JSON(200, gin.H{"peer": updatedSession.peers[1].IP})
+			c.JSON(200, gin.H{
+				"peer":       updatedSession.peers[1].IP,
+				"local_addr": updatedSession.peers[1].LocalAddr,
+			})
 			return
 		}
 
@@ -80,12 +76,15 @@ func main() {
 			return
 		}
 
-		session.peers[1] = Peer{IP: sessionInfo.UdpAddr}
+		session.peers[1] = Peer{IP: sessionInfo.UdpAddr, LocalAddr: sessionInfo.LocalAddr}
 		sessions[sessionId] = session
 		close(session.ready)
 		mu.Unlock()
 		fmt.Printf("Session completed: %+v\n", session)
-		c.JSON(200, gin.H{"peer": session.peers[0].IP})
+		c.JSON(200, gin.H{
+			"peer":       session.peers[0].IP,
+			"local_addr": session.peers[0].LocalAddr,
+		})
 	})
 
 	r.POST("/create_session", func(c *gin.Context) {
@@ -117,8 +116,9 @@ func main() {
 
 	r.POST("/join_session/:id", func(c *gin.Context) {
 		var body struct {
-			Password string `json:"password"`
-			UdpAddr  string `json:"udp_addr"`
+			Password  string `json:"password"`
+			UdpAddr   string `json:"udp_addr"`
+			LocalAddr string `json:"local_addr"`
 		}
 		sessionId := c.Param("id")
 
@@ -140,14 +140,16 @@ func main() {
 			return
 		}
 		if secretSession.session.peers[0].IP == "" {
-			// first peer
-			secretSession.session.peers[0] = Peer{IP: body.UdpAddr}
+			secretSession.session.peers[0] = Peer{IP: body.UdpAddr, LocalAddr: body.LocalAddr}
 			secretSessions[sessionId] = secretSession
 			mu.Unlock()
 			<-secretSessions[sessionId].session.ready
 			updatedSession := secretSessions[sessionId]
 			delete(secretSessions, sessionId)
-			c.JSON(200, gin.H{"peer": updatedSession.session.peers[1].IP})
+			c.JSON(200, gin.H{
+				"peer":       updatedSession.session.peers[1].IP,
+				"local_addr": updatedSession.session.peers[1].LocalAddr,
+			})
 			return
 		}
 		if secretSession.session.peers[1].IP != "" {
@@ -155,12 +157,14 @@ func main() {
 			c.JSON(400, gin.H{"error": "session already full"})
 			return
 		}
-		// second peer
-		secretSession.session.peers[1] = Peer{IP: body.UdpAddr}
+		secretSession.session.peers[1] = Peer{IP: body.UdpAddr, LocalAddr: body.LocalAddr}
 		secretSessions[sessionId] = secretSession
 		close(secretSession.session.ready)
 		mu.Unlock()
-		c.JSON(200, gin.H{"peer": secretSession.session.peers[0].IP})
+		c.JSON(200, gin.H{
+			"peer":       secretSession.session.peers[0].IP,
+			"local_addr": secretSession.session.peers[0].LocalAddr,
+		})
 	})
 
 	r.GET("/", func(c *gin.Context) {
