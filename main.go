@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"io"
 	"sync"
 	"time"
 
@@ -14,17 +15,28 @@ type Peer struct {
 }
 
 type Session struct {
-	peers    []Peer
-	maxPeers int
+	peers     []Peer
+	maxPeers  int
+	notifiers []chan Peer // one channel per active SSE stream
 }
 
 type SecretSession struct {
-	password string
-	maxPeers int
-	peers    []Peer
+	password  string
+	maxPeers  int
+	peers     []Peer
+	notifiers []chan Peer
 }
 
 var Version = "dev"
+
+func removeNotifier(notifiers []chan Peer, ch chan Peer) []chan Peer {
+	for i, n := range notifiers {
+		if n == ch {
+			return append(notifiers[:i], notifiers[i+1:]...)
+		}
+	}
+	return notifiers
+}
 
 func main() {
 	gin.SetMode(gin.ReleaseMode)
@@ -35,7 +47,7 @@ func main() {
 	secretSessions := map[string]SecretSession{}
 	var mu sync.Mutex
 
-	// simple session without password
+	// join simple session — returns peers already present, notifies existing streamers
 	r.POST("/session/:id", func(c *gin.Context) {
 		var body struct {
 			UdpAddr   string `json:"udp_addr"`
@@ -50,11 +62,18 @@ func main() {
 		session := sessions[sessionId]
 		existingPeers := make([]Peer, len(session.peers))
 		copy(existingPeers, session.peers)
-		session.peers = append(session.peers, Peer{IP: body.UdpAddr, LocalAddr: body.LocalAddr})
+		newPeer := Peer{IP: body.UdpAddr, LocalAddr: body.LocalAddr}
+		// notify all clients currently streaming this session
+		for _, ch := range session.notifiers {
+			select {
+			case ch <- newPeer:
+			default:
+			}
+		}
+		session.peers = append(session.peers, newPeer)
 		sessions[sessionId] = session
 		mu.Unlock()
 		go func() {
-			// auto cleanup if no one joins in 10 minutes
 			time.Sleep(10 * time.Minute)
 			mu.Lock()
 			if _, exists := sessions[sessionId]; exists {
@@ -64,6 +83,54 @@ func main() {
 			mu.Unlock()
 		}()
 		c.JSON(200, gin.H{"peers": existingPeers})
+	})
+
+	// SSE stream: sends peers already in session as initial events, then pushes new ones as they join.
+	// ?udp_addr= is used to filter the caller's own address out of the stream.
+	r.GET("/session/:id/stream", func(c *gin.Context) {
+		sessionId := c.Param("id")
+		myAddr := c.Query("udp_addr")
+
+		mu.Lock()
+		session, exists := sessions[sessionId]
+		if !exists {
+			mu.Unlock()
+			c.JSON(404, gin.H{"error": "session not found"})
+			return
+		}
+		// Buffer sized for current peers + room for incoming ones.
+		// Pre-filled here (under the lock) so we don't miss peers that join
+		// between reading the list and registering the notifier.
+		ch := make(chan Peer, len(session.peers)+10)
+		for _, peer := range session.peers {
+			if peer.IP != myAddr {
+				ch <- peer
+			}
+		}
+		session.notifiers = append(session.notifiers, ch)
+		sessions[sessionId] = session
+		mu.Unlock()
+
+		defer func() {
+			mu.Lock()
+			s := sessions[sessionId]
+			s.notifiers = removeNotifier(s.notifiers, ch)
+			sessions[sessionId] = s
+			mu.Unlock()
+		}()
+
+		c.Stream(func(w io.Writer) bool {
+			select {
+			case peer, ok := <-ch:
+				if !ok {
+					return false
+				}
+				c.SSEvent("peer", peer)
+				return true
+			case <-c.Request.Context().Done():
+				return false
+			}
+		})
 	})
 
 	// leave simple session
@@ -127,7 +194,7 @@ func main() {
 		c.JSON(200, gin.H{"message": "session created"})
 	})
 
-	// join password-protected session
+	// join password-protected session — returns peers already present, notifies existing streamers
 	r.POST("/join_session/:id", func(c *gin.Context) {
 		var body struct {
 			Password  string `json:"password"`
@@ -158,10 +225,67 @@ func main() {
 		}
 		existingPeers := make([]Peer, len(secretSession.peers))
 		copy(existingPeers, secretSession.peers)
-		secretSession.peers = append(secretSession.peers, Peer{IP: body.UdpAddr, LocalAddr: body.LocalAddr})
+		newPeer := Peer{IP: body.UdpAddr, LocalAddr: body.LocalAddr}
+		for _, ch := range secretSession.notifiers {
+			select {
+			case ch <- newPeer:
+			default:
+			}
+		}
+		secretSession.peers = append(secretSession.peers, newPeer)
 		secretSessions[sessionId] = secretSession
 		mu.Unlock()
 		c.JSON(200, gin.H{"peers": existingPeers})
+	})
+
+	// SSE stream for password-protected session
+	r.GET("/join_session/:id/stream", func(c *gin.Context) {
+		sessionId := c.Param("id")
+		password := c.Query("password")
+		myAddr := c.Query("udp_addr")
+
+		mu.Lock()
+		secretSession, exists := secretSessions[sessionId]
+		if !exists {
+			mu.Unlock()
+			c.JSON(404, gin.H{"error": "session not found"})
+			return
+		}
+		if secretSession.password != password {
+			mu.Unlock()
+			c.JSON(401, gin.H{"error": "incorrect password"})
+			return
+		}
+		ch := make(chan Peer, len(secretSession.peers)+10)
+		for _, peer := range secretSession.peers {
+			if peer.IP != myAddr {
+				ch <- peer
+			}
+		}
+		secretSession.notifiers = append(secretSession.notifiers, ch)
+		secretSessions[sessionId] = secretSession
+		mu.Unlock()
+
+		defer func() {
+			mu.Lock()
+			s := secretSessions[sessionId]
+			s.notifiers = removeNotifier(s.notifiers, ch)
+			secretSessions[sessionId] = s
+			mu.Unlock()
+		}()
+
+		c.Stream(func(w io.Writer) bool {
+			select {
+			case peer, ok := <-ch:
+				if !ok {
+					return false
+				}
+				c.SSEvent("peer", peer)
+				return true
+			case <-c.Request.Context().Done():
+				return false
+			}
+		})
 	})
 
 	// leave password-protected session
