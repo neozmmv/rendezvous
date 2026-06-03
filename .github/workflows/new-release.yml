@@ -1,0 +1,62 @@
+name: Rendezvous Release
+
+on: 
+  push:
+    tags:
+      - 'v*.*.*'
+
+permissions:
+    contents: write
+
+jobs:
+    build:
+        name: Build and Upload
+        runs-on: ubuntu-latest
+        steps:
+            - name: Checkout
+              uses: actions/checkout@v4
+
+            - name: Set up Go
+              uses: actions/setup-go@v4
+              with:
+                go-version: '1.25.6'
+
+            - name: Build
+              run: |
+                GOOS=linux GOARCH=amd64 go build -ldflags "-X github.com/neozmmv/rendezvous/main.Version=${{ github.ref_name }}" -o rendezvous-linux-amd64 .
+                GOOS=linux GOARCH=arm64 go build -ldflags "-X github.com/neozmmv/rendezvous/main.Version=${{ github.ref_name }}" -o rendezvous-linux-arm64 .
+                GOOS=windows GOARCH=amd64 go build -ldflags "-X github.com/neozmmv/rendezvous/main.Version=${{ github.ref_name }}" -o rendezvous.exe .
+                GOOS=darwin GOARCH=amd64 go build -ldflags "-X github.com/neozmmv/rendezvous/main.Version=${{ github.ref_name }}" -o rendezvous-darwin-amd64 .
+                GOOS=darwin GOARCH=arm64 go build -ldflags "-X github.com/neozmmv/rendezvous/main.Version=${{ github.ref_name }}" -o rendezvous-darwin-arm64 .
+            
+            - name: Upload Artifacts
+              uses: actions/upload-artifact@v4
+              with:
+                name: binaries
+                path: |
+                  rendezvous-linux-amd64
+                  rendezvous-linux-arm64
+                  rendezvous.exe
+                  rendezvous-darwin-amd64
+                  rendezvous-darwin-arm64
+
+    release:
+        name: Release
+        needs: build
+        runs-on: ubuntu-latest
+        steps:
+          - name: Download Artifacts
+            uses: actions/download-artifact@v4
+            with:
+              name: binaries
+
+          - name: Create Release
+            uses: softprops/action-gh-release@v2
+            with:
+              name: "Rendezvous ${{ github.ref_name }}"
+              files: |
+                rendezvous-linux-amd64
+                rendezvous-linux-arm64
+                rendezvous.exe
+                rendezvous-darwin-amd64
+                rendezvous-darwin-arm64
