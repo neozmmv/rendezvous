@@ -88,6 +88,10 @@ func main() {
 	// SSE stream: sends peers already in session as initial events, then pushes new ones as they join.
 	// ?udp_addr= is used to filter the caller's own address out of the stream.
 	r.GET("/session/:id/stream", func(c *gin.Context) {
+		c.Header("Content-Type", "text/event-stream")
+		c.Header("Cache-Control", "no-cache")
+		c.Header("Connection", "keep-alive")
+		c.Header("X-Accel-Buffering", "no")
 		sessionId := c.Param("id")
 		myAddr := c.Query("udp_addr")
 
@@ -240,6 +244,10 @@ func main() {
 
 	// SSE stream for password-protected session
 	r.GET("/join_session/:id/stream", func(c *gin.Context) {
+		c.Header("Content-Type", "text/event-stream")
+		c.Header("Cache-Control", "no-cache")
+		c.Header("Connection", "keep-alive")
+		c.Header("X-Accel-Buffering", "no")
 		sessionId := c.Param("id")
 		password := c.Query("password")
 		myAddr := c.Query("udp_addr")
