@@ -8,89 +8,60 @@ import (
 	"github.com/gin-gonic/gin"
 )
 
-type SessionInfo struct {
-	UdpAddr   string `json:"udp_addr"`
-	LocalAddr string `json:"local_addr"`
-}
-
-type SessionInfoWithPassword struct {
-	UdpAddr   string `json:"udp_addr"`
-	LocalAddr string `json:"local_addr"`
-	Password  string `json:"password"`
-}
-
 type Peer struct {
 	IP        string `json:"ip"`
 	LocalAddr string `json:"local_addr"`
 }
 
 type Session struct {
-	peers [2]Peer
-	ready chan struct{}
+	peers    []Peer
+	maxPeers int
 }
 
 type SecretSession struct {
 	password string
-	session  Session
+	maxPeers int
+	peers    []Peer
 }
 
 var Version = "dev"
 
 func main() {
+	gin.SetMode(gin.ReleaseMode)
 	r := gin.Default()
+	r.Use(RateLimitMiddleware(NewIPRateLimiter(2, 5)))
+
 	sessions := map[string]Session{}
 	secretSessions := map[string]SecretSession{}
-
 	var mu sync.Mutex
 
+	// simple session without password
 	r.POST("/session/:id", func(c *gin.Context) {
-		var sessionInfo SessionInfo
+		var body struct {
+			UdpAddr   string `json:"udp_addr"`
+			LocalAddr string `json:"local_addr"`
+		}
 		sessionId := c.Param("id")
-		fmt.Println("Creating session with id: ", sessionId)
-
-		c.BindJSON(&sessionInfo)
-
+		if err := c.ShouldBindJSON(&body); err != nil || body.UdpAddr == "" {
+			c.JSON(400, gin.H{"error": "udp_addr required"})
+			return
+		}
 		mu.Lock()
-		session, exists := sessions[sessionId]
-		if !exists {
-			sessions[sessionId] = Session{
-				peers: [2]Peer{
-					{IP: sessionInfo.UdpAddr, LocalAddr: sessionInfo.LocalAddr},
-				},
-				ready: make(chan struct{}),
-			}
-			mu.Unlock()
-			<-sessions[sessionId].ready
-			updatedSession := sessions[sessionId]
-			delete(sessions, sessionId)
-			c.JSON(200, gin.H{
-				"peer":       updatedSession.peers[1].IP,
-				"local_addr": updatedSession.peers[1].LocalAddr,
-			})
-			return
-		}
-
-		if session.peers[1].IP != "" {
-			mu.Unlock()
-			c.JSON(400, gin.H{"error": "session already full"})
-			return
-		}
-
-		session.peers[1] = Peer{IP: sessionInfo.UdpAddr, LocalAddr: sessionInfo.LocalAddr}
+		session := sessions[sessionId]
+		existingPeers := make([]Peer, len(session.peers))
+		copy(existingPeers, session.peers)
+		session.peers = append(session.peers, Peer{IP: body.UdpAddr, LocalAddr: body.LocalAddr})
 		sessions[sessionId] = session
-		close(session.ready)
 		mu.Unlock()
-		fmt.Printf("Session completed: %+v\n", session)
-		c.JSON(200, gin.H{
-			"peer":       session.peers[0].IP,
-			"local_addr": session.peers[0].LocalAddr,
-		})
+		c.JSON(200, gin.H{"peers": existingPeers})
 	})
 
+	// create password-protected session
 	r.POST("/create_session", func(c *gin.Context) {
 		var body struct {
 			Password string `json:"password"`
 			Id       string `json:"id"`
+			MaxPeers int    `json:"max_peers"`
 		}
 		if err := c.ShouldBindJSON(&body); err != nil || body.Password == "" || body.Id == "" {
 			c.JSON(400, gin.H{"error": "password and id required"})
@@ -105,15 +76,15 @@ func main() {
 		}
 		secretSessions[body.Id] = SecretSession{
 			password: body.Password,
-			session: Session{
-				ready: make(chan struct{}),
-			},
+			maxPeers: body.MaxPeers,
+			peers:    []Peer{},
 		}
 		mu.Unlock()
 		go killSessionWatcher(secretSessions, body.Id, &mu)
 		c.JSON(200, gin.H{"message": "session created"})
 	})
 
+	// join password-protected session
 	r.POST("/join_session/:id", func(c *gin.Context) {
 		var body struct {
 			Password  string `json:"password"`
@@ -121,12 +92,10 @@ func main() {
 			LocalAddr string `json:"local_addr"`
 		}
 		sessionId := c.Param("id")
-
 		if err := c.ShouldBindJSON(&body); err != nil || body.UdpAddr == "" || body.Password == "" {
 			c.JSON(400, gin.H{"error": "password and udp_addr required"})
 			return
 		}
-
 		mu.Lock()
 		secretSession, exists := secretSessions[sessionId]
 		if !exists {
@@ -139,39 +108,23 @@ func main() {
 			c.JSON(401, gin.H{"error": "incorrect password"})
 			return
 		}
-		if secretSession.session.peers[0].IP == "" {
-			secretSession.session.peers[0] = Peer{IP: body.UdpAddr, LocalAddr: body.LocalAddr}
-			secretSessions[sessionId] = secretSession
+		if secretSession.maxPeers > 0 && len(secretSession.peers) >= secretSession.maxPeers {
 			mu.Unlock()
-			<-secretSessions[sessionId].session.ready
-			updatedSession := secretSessions[sessionId]
-			delete(secretSessions, sessionId)
-			c.JSON(200, gin.H{
-				"peer":       updatedSession.session.peers[1].IP,
-				"local_addr": updatedSession.session.peers[1].LocalAddr,
-			})
+			c.JSON(400, gin.H{"error": "session is full"})
 			return
 		}
-		if secretSession.session.peers[1].IP != "" {
-			mu.Unlock()
-			c.JSON(400, gin.H{"error": "session already full"})
-			return
-		}
-		secretSession.session.peers[1] = Peer{IP: body.UdpAddr, LocalAddr: body.LocalAddr}
+		existingPeers := make([]Peer, len(secretSession.peers))
+		copy(existingPeers, secretSession.peers)
+		secretSession.peers = append(secretSession.peers, Peer{IP: body.UdpAddr, LocalAddr: body.LocalAddr})
 		secretSessions[sessionId] = secretSession
-		close(secretSession.session.ready)
 		mu.Unlock()
-		c.JSON(200, gin.H{
-			"peer":       secretSession.session.peers[0].IP,
-			"local_addr": secretSession.session.peers[0].LocalAddr,
-		})
+		c.JSON(200, gin.H{"peers": existingPeers})
 	})
 
 	r.GET("/", func(c *gin.Context) {
-		clientIP := c.ClientIP()
 		c.JSON(200, gin.H{
 			"message":  "Welcome to the Rendezvous Server!",
-			"clientIP": clientIP,
+			"clientIP": c.ClientIP(),
 		})
 	})
 
@@ -182,9 +135,8 @@ func main() {
 func killSessionWatcher(sessions map[string]SecretSession, id string, mu *sync.Mutex) {
 	time.Sleep(5 * time.Minute)
 	mu.Lock()
-	secret, exists := sessions[id]
-	if exists && secret.session.peers[1].IP == "" {
-		close(secret.session.ready)
+	_, exists := sessions[id]
+	if exists {
 		delete(sessions, id)
 		fmt.Printf("Session %v expired\n", id)
 	}
