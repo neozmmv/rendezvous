@@ -53,7 +53,50 @@ func main() {
 		session.peers = append(session.peers, Peer{IP: body.UdpAddr, LocalAddr: body.LocalAddr})
 		sessions[sessionId] = session
 		mu.Unlock()
+		go func() {
+			// auto cleanup if no one joins in 10 minutes
+			time.Sleep(10 * time.Minute)
+			mu.Lock()
+			if _, exists := sessions[sessionId]; exists {
+				delete(sessions, sessionId)
+				fmt.Printf("Session %v expired\n", sessionId)
+			}
+			mu.Unlock()
+		}()
 		c.JSON(200, gin.H{"peers": existingPeers})
+	})
+
+	// leave simple session
+	r.POST("/session/:id/leave", func(c *gin.Context) {
+		var body struct {
+			UdpAddr string `json:"udp_addr"`
+		}
+		sessionId := c.Param("id")
+		if err := c.ShouldBindJSON(&body); err != nil || body.UdpAddr == "" {
+			c.JSON(400, gin.H{"error": "udp_addr required"})
+			return
+		}
+		mu.Lock()
+		session, exists := sessions[sessionId]
+		if !exists {
+			mu.Unlock()
+			c.JSON(404, gin.H{"error": "session not found"})
+			return
+		}
+		for i, peer := range session.peers {
+			if peer.IP == body.UdpAddr {
+				session.peers = append(session.peers[:i], session.peers[i+1:]...)
+				break
+			}
+		}
+		if len(session.peers) == 0 {
+			delete(sessions, sessionId)
+			fmt.Printf("Session %v deleted\n", sessionId)
+		} else {
+			sessions[sessionId] = session
+		}
+		mu.Unlock()
+		c.JSON(200, gin.H{"message": "left session"})
 	})
 
 	// create password-protected session
@@ -119,6 +162,45 @@ func main() {
 		secretSessions[sessionId] = secretSession
 		mu.Unlock()
 		c.JSON(200, gin.H{"peers": existingPeers})
+	})
+
+	// leave password-protected session
+	r.POST("/join_session/:id/leave", func(c *gin.Context) {
+		var body struct {
+			UdpAddr  string `json:"udp_addr"`
+			Password string `json:"password"`
+		}
+		sessionId := c.Param("id")
+		if err := c.ShouldBindJSON(&body); err != nil || body.UdpAddr == "" || body.Password == "" {
+			c.JSON(400, gin.H{"error": "udp_addr and password required"})
+			return
+		}
+		mu.Lock()
+		secretSession, exists := secretSessions[sessionId]
+		if !exists {
+			mu.Unlock()
+			c.JSON(404, gin.H{"error": "session not found"})
+			return
+		}
+		if secretSession.password != body.Password {
+			mu.Unlock()
+			c.JSON(401, gin.H{"error": "incorrect password"})
+			return
+		}
+		for i, peer := range secretSession.peers {
+			if peer.IP == body.UdpAddr {
+				secretSession.peers = append(secretSession.peers[:i], secretSession.peers[i+1:]...)
+				break
+			}
+		}
+		if len(secretSession.peers) == 0 {
+			delete(secretSessions, sessionId)
+			fmt.Printf("Session %v deleted\n", sessionId)
+		} else {
+			secretSessions[sessionId] = secretSession
+		}
+		mu.Unlock()
+		c.JSON(200, gin.H{"message": "left session"})
 	})
 
 	r.GET("/", func(c *gin.Context) {
