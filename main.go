@@ -29,6 +29,8 @@ type SecretSession struct {
 
 var Version = "dev"
 
+const peerTTL = 10 * time.Minute
+
 func removeNotifier(notifiers []chan Peer, ch chan Peer) []chan Peer {
 	for i, n := range notifiers {
 		if n == ch {
@@ -73,15 +75,7 @@ func main() {
 		session.peers = append(session.peers, newPeer)
 		sessions[sessionId] = session
 		mu.Unlock()
-		go func() {
-			time.Sleep(10 * time.Minute)
-			mu.Lock()
-			if _, exists := sessions[sessionId]; exists {
-				delete(sessions, sessionId)
-				fmt.Printf("Session %v expired\n", sessionId)
-			}
-			mu.Unlock()
-		}()
+		go peerTTLWatcher(sessions, sessionId, body.UdpAddr, &mu)
 		c.JSON(200, gin.H{"peers": existingPeers})
 	})
 
@@ -246,6 +240,7 @@ func main() {
 		secretSession.peers = append(secretSession.peers, newPeer)
 		secretSessions[sessionId] = secretSession
 		mu.Unlock()
+		go secretPeerTTLWatcher(secretSessions, sessionId, body.UdpAddr, &mu)
 		c.JSON(200, gin.H{"peers": existingPeers})
 	})
 
@@ -306,15 +301,14 @@ func main() {
 		})
 	})
 
-	// leave password-protected session
+	// leave password-protected session — no password required, match on udp_addr only
 	r.POST("/join_session/:id/leave", func(c *gin.Context) {
 		var body struct {
-			UdpAddr  string `json:"udp_addr"`
-			Password string `json:"password"`
+			UdpAddr string `json:"udp_addr"`
 		}
 		sessionId := c.Param("id")
-		if err := c.ShouldBindJSON(&body); err != nil || body.UdpAddr == "" || body.Password == "" {
-			c.JSON(400, gin.H{"error": "udp_addr and password required"})
+		if err := c.ShouldBindJSON(&body); err != nil || body.UdpAddr == "" {
+			c.JSON(400, gin.H{"error": "udp_addr required"})
 			return
 		}
 		mu.Lock()
@@ -322,11 +316,6 @@ func main() {
 		if !exists {
 			mu.Unlock()
 			c.JSON(404, gin.H{"error": "session not found"})
-			return
-		}
-		if secretSession.password != body.Password {
-			mu.Unlock()
-			c.JSON(401, gin.H{"error": "incorrect password"})
 			return
 		}
 		for i, peer := range secretSession.peers {
@@ -360,10 +349,56 @@ func main() {
 func killSessionWatcher(sessions map[string]SecretSession, id string, mu *sync.Mutex) {
 	time.Sleep(5 * time.Minute)
 	mu.Lock()
-	_, exists := sessions[id]
-	if exists {
+	defer mu.Unlock()
+	s, exists := sessions[id]
+	if exists && len(s.peers) == 0 {
 		delete(sessions, id)
-		fmt.Printf("Session %v expired\n", id)
+		fmt.Printf("Session %v expired (no peers joined)\n", id)
 	}
-	mu.Unlock()
+}
+
+func peerTTLWatcher(sessions map[string]Session, sessionId, udpAddr string, mu *sync.Mutex) {
+	time.Sleep(peerTTL)
+	mu.Lock()
+	defer mu.Unlock()
+	s, exists := sessions[sessionId]
+	if !exists {
+		return
+	}
+	for i, p := range s.peers {
+		if p.IP == udpAddr {
+			s.peers = append(s.peers[:i], s.peers[i+1:]...)
+			fmt.Printf("Peer %v removed from session %v (TTL expired)\n", udpAddr, sessionId)
+			break
+		}
+	}
+	if len(s.peers) == 0 {
+		delete(sessions, sessionId)
+		fmt.Printf("Session %v deleted (empty after peer TTL)\n", sessionId)
+	} else {
+		sessions[sessionId] = s
+	}
+}
+
+func secretPeerTTLWatcher(sessions map[string]SecretSession, sessionId, udpAddr string, mu *sync.Mutex) {
+	time.Sleep(peerTTL)
+	mu.Lock()
+	defer mu.Unlock()
+	s, exists := sessions[sessionId]
+	if !exists {
+		return
+	}
+	for i, p := range s.peers {
+		if p.IP == udpAddr {
+			s.peers = append(s.peers[:i], s.peers[i+1:]...)
+			fmt.Printf("Peer %v removed from session %v (TTL expired)\n", udpAddr, sessionId)
+			break
+		}
+	}
+	if len(s.peers) == 0 {
+		delete(sessions, sessionId)
+		fmt.Printf("Session %v deleted (empty after peer TTL)\n", sessionId)
+	} else {
+		sessions[sessionId] = s
+	}
 }
