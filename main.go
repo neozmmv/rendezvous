@@ -86,7 +86,7 @@ func main() {
 	})
 
 	r.GET("/version", func(c *gin.Context) {
-		c.JSON(200, gin.H{"version": Version})
+		c.JSON(200, gin.H{"version": Version}) // works best if ran by the published binary
 	})
 
 	// SSE stream: sends peers already in session as initial events, then pushes new ones as they join.
@@ -349,6 +349,7 @@ func main() {
 		c.JSON(200, gin.H{
 			"message":  "Welcome to the Rendezvous Server!",
 			"clientIP": c.ClientIP(),
+			"version":  Version,
 		})
 	})
 
