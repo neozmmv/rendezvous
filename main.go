@@ -85,6 +85,10 @@ func main() {
 		c.JSON(200, gin.H{"peers": existingPeers})
 	})
 
+	r.GET("/version", func(c *gin.Context) {
+		c.JSON(200, gin.H{"version": Version})
+	})
+
 	// SSE stream: sends peers already in session as initial events, then pushes new ones as they join.
 	// ?udp_addr= is used to filter the caller's own address out of the stream.
 	r.GET("/session/:id/stream", func(c *gin.Context) {
