@@ -131,6 +131,9 @@ func main() {
 				}
 				c.SSEvent("peer", peer)
 				return true
+			case <-time.After(30 * time.Second):
+				fmt.Fprintf(w, ": keepalive\n\n")
+				return true
 			case <-c.Request.Context().Done():
 				return false
 			}
@@ -289,6 +292,9 @@ func main() {
 					return false
 				}
 				c.SSEvent("peer", peer)
+				return true
+			case <-time.After(30 * time.Second):
+				fmt.Fprintf(w, ": keepalive\n\n")
 				return true
 			case <-c.Request.Context().Done():
 				return false
