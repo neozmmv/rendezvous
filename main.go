@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"io"
 	"sync"
@@ -15,16 +16,18 @@ type Peer struct {
 }
 
 type Session struct {
-	peers     []Peer
-	maxPeers  int
-	notifiers []chan Peer // one channel per active SSE stream
+	peers       []Peer
+	maxPeers    int
+	notifiers   []chan Peer
+	peerCancels map[string]context.CancelFunc
 }
 
 type SecretSession struct {
-	password  string
-	maxPeers  int
-	peers     []Peer
-	notifiers []chan Peer
+	password    string
+	maxPeers    int
+	peers       []Peer
+	notifiers   []chan Peer
+	peerCancels map[string]context.CancelFunc
 }
 
 var Version = "dev"
@@ -40,6 +43,17 @@ func removeNotifier(notifiers []chan Peer, ch chan Peer) []chan Peer {
 	return notifiers
 }
 
+// closeSession closes all SSE notifier channels and cancels all pending TTL goroutines.
+// Must be called with mu held; the caller is responsible for deleting the session from the map.
+func closeSession(notifiers []chan Peer, cancels map[string]context.CancelFunc) {
+	for _, ch := range notifiers {
+		close(ch)
+	}
+	for _, cancel := range cancels {
+		cancel()
+	}
+}
+
 func main() {
 	gin.SetMode(gin.ReleaseMode)
 	r := gin.Default()
@@ -49,7 +63,6 @@ func main() {
 	secretSessions := map[string]SecretSession{}
 	var mu sync.Mutex
 
-	// join simple session — returns peers already present, notifies existing streamers
 	r.POST("/session/:id", func(c *gin.Context) {
 		var body struct {
 			UdpAddr   string `json:"udp_addr"`
@@ -62,29 +75,40 @@ func main() {
 		}
 		mu.Lock()
 		session := sessions[sessionId]
-		existingPeers := make([]Peer, len(session.peers))
-		copy(existingPeers, session.peers)
+		if session.peerCancels == nil {
+			session.peerCancels = map[string]context.CancelFunc{}
+		}
+		// Cancel any existing TTL for this peer (heartbeat / re-registration).
+		if cancel, exists := session.peerCancels[body.UdpAddr]; exists {
+			cancel()
+		}
+		// Build existingPeers excluding the registering peer, and remove it from the list.
+		var existingPeers []Peer
+		for _, p := range session.peers {
+			if p.IP != body.UdpAddr {
+				existingPeers = append(existingPeers, p)
+			}
+		}
 		newPeer := Peer{IP: body.UdpAddr, LocalAddr: body.LocalAddr}
-		// notify all clients currently streaming this session
 		for _, ch := range session.notifiers {
 			select {
 			case ch <- newPeer:
 			default:
 			}
 		}
-		session.peers = append(session.peers, newPeer)
+		session.peers = append(existingPeers, newPeer)
+		ctx, cancel := context.WithCancel(context.Background())
+		session.peerCancels[body.UdpAddr] = cancel
 		sessions[sessionId] = session
 		mu.Unlock()
-		go peerTTLWatcher(sessions, sessionId, body.UdpAddr, &mu)
+		go peerTTLWatcher(sessions, sessionId, body.UdpAddr, &mu, ctx)
 		c.JSON(200, gin.H{"peers": existingPeers})
 	})
 
 	r.GET("/version", func(c *gin.Context) {
-		c.JSON(200, gin.H{"version": Version}) // works best if ran by the published binary
+		c.JSON(200, gin.H{"version": Version})
 	})
 
-	// SSE stream: sends peers already in session as initial events, then pushes new ones as they join.
-	// ?udp_addr= is used to filter the caller's own address out of the stream.
 	r.GET("/session/:id/stream", func(c *gin.Context) {
 		c.Header("Content-Type", "text/event-stream")
 		c.Header("Cache-Control", "no-cache")
@@ -100,9 +124,6 @@ func main() {
 			c.JSON(404, gin.H{"error": "session not found"})
 			return
 		}
-		// Buffer sized for current peers + room for incoming ones.
-		// Pre-filled here (under the lock) so we don't miss peers that join
-		// between reading the list and registering the notifier.
 		ch := make(chan Peer, len(session.peers)+10)
 		for _, peer := range session.peers {
 			if peer.IP != myAddr {
@@ -115,9 +136,10 @@ func main() {
 
 		defer func() {
 			mu.Lock()
-			s := sessions[sessionId]
-			s.notifiers = removeNotifier(s.notifiers, ch)
-			sessions[sessionId] = s
+			if s, exists := sessions[sessionId]; exists {
+				s.notifiers = removeNotifier(s.notifiers, ch)
+				sessions[sessionId] = s
+			}
 			mu.Unlock()
 		}()
 
@@ -138,7 +160,6 @@ func main() {
 		})
 	})
 
-	// leave simple session
 	r.POST("/session/:id/leave", func(c *gin.Context) {
 		var body struct {
 			UdpAddr string `json:"udp_addr"`
@@ -158,10 +179,15 @@ func main() {
 		for i, peer := range session.peers {
 			if peer.IP == body.UdpAddr {
 				session.peers = append(session.peers[:i], session.peers[i+1:]...)
+				if cancel, ok := session.peerCancels[body.UdpAddr]; ok {
+					cancel()
+					delete(session.peerCancels, body.UdpAddr)
+				}
 				break
 			}
 		}
 		if len(session.peers) == 0 {
+			closeSession(session.notifiers, session.peerCancels)
 			delete(sessions, sessionId)
 			fmt.Printf("Session %v deleted\n", sessionId)
 		} else {
@@ -171,7 +197,6 @@ func main() {
 		c.JSON(200, gin.H{"message": "left session"})
 	})
 
-	// create password-protected session
 	r.POST("/create_session", func(c *gin.Context) {
 		var body struct {
 			Password string `json:"password"`
@@ -190,16 +215,16 @@ func main() {
 			return
 		}
 		secretSessions[body.Id] = SecretSession{
-			password: body.Password,
-			maxPeers: body.MaxPeers,
-			peers:    []Peer{},
+			password:    body.Password,
+			maxPeers:    body.MaxPeers,
+			peers:       []Peer{},
+			peerCancels: map[string]context.CancelFunc{},
 		}
 		mu.Unlock()
 		go killSessionWatcher(secretSessions, body.Id, &mu)
 		c.JSON(200, gin.H{"message": "session created"})
 	})
 
-	// join password-protected session — returns peers already present, notifies existing streamers
 	r.POST("/join_session/:id", func(c *gin.Context) {
 		var body struct {
 			Password  string `json:"password"`
@@ -223,13 +248,25 @@ func main() {
 			c.JSON(401, gin.H{"error": "incorrect password"})
 			return
 		}
-		if secretSession.maxPeers > 0 && len(secretSession.peers) >= secretSession.maxPeers {
+		if secretSession.peerCancels == nil {
+			secretSession.peerCancels = map[string]context.CancelFunc{}
+		}
+		// Cancel any existing TTL for this peer (heartbeat / re-registration).
+		if cancel, exists := secretSession.peerCancels[body.UdpAddr]; exists {
+			cancel()
+		}
+		// Build existingPeers excluding the registering peer, and remove it from the list.
+		var existingPeers []Peer
+		for _, p := range secretSession.peers {
+			if p.IP != body.UdpAddr {
+				existingPeers = append(existingPeers, p)
+			}
+		}
+		if secretSession.maxPeers > 0 && len(existingPeers) >= secretSession.maxPeers {
 			mu.Unlock()
 			c.JSON(400, gin.H{"error": "session is full"})
 			return
 		}
-		existingPeers := make([]Peer, len(secretSession.peers))
-		copy(existingPeers, secretSession.peers)
 		newPeer := Peer{IP: body.UdpAddr, LocalAddr: body.LocalAddr}
 		for _, ch := range secretSession.notifiers {
 			select {
@@ -237,14 +274,15 @@ func main() {
 			default:
 			}
 		}
-		secretSession.peers = append(secretSession.peers, newPeer)
+		secretSession.peers = append(existingPeers, newPeer)
+		ctx, cancel := context.WithCancel(context.Background())
+		secretSession.peerCancels[body.UdpAddr] = cancel
 		secretSessions[sessionId] = secretSession
 		mu.Unlock()
-		go secretPeerTTLWatcher(secretSessions, sessionId, body.UdpAddr, &mu)
+		go secretPeerTTLWatcher(secretSessions, sessionId, body.UdpAddr, &mu, ctx)
 		c.JSON(200, gin.H{"peers": existingPeers})
 	})
 
-	// SSE stream for password-protected session
 	r.GET("/join_session/:id/stream", func(c *gin.Context) {
 		c.Header("Content-Type", "text/event-stream")
 		c.Header("Cache-Control", "no-cache")
@@ -278,9 +316,10 @@ func main() {
 
 		defer func() {
 			mu.Lock()
-			s := secretSessions[sessionId]
-			s.notifiers = removeNotifier(s.notifiers, ch)
-			secretSessions[sessionId] = s
+			if s, exists := secretSessions[sessionId]; exists {
+				s.notifiers = removeNotifier(s.notifiers, ch)
+				secretSessions[sessionId] = s
+			}
 			mu.Unlock()
 		}()
 
@@ -301,7 +340,6 @@ func main() {
 		})
 	})
 
-	// leave password-protected session — no password required, match on udp_addr only
 	r.POST("/join_session/:id/leave", func(c *gin.Context) {
 		var body struct {
 			UdpAddr string `json:"udp_addr"`
@@ -321,10 +359,15 @@ func main() {
 		for i, peer := range secretSession.peers {
 			if peer.IP == body.UdpAddr {
 				secretSession.peers = append(secretSession.peers[:i], secretSession.peers[i+1:]...)
+				if cancel, ok := secretSession.peerCancels[body.UdpAddr]; ok {
+					cancel()
+					delete(secretSession.peerCancels, body.UdpAddr)
+				}
 				break
 			}
 		}
 		if len(secretSession.peers) == 0 {
+			closeSession(secretSession.notifiers, secretSession.peerCancels)
 			delete(secretSessions, sessionId)
 			fmt.Printf("Session %v deleted\n", sessionId)
 		} else {
@@ -352,13 +395,18 @@ func killSessionWatcher(sessions map[string]SecretSession, id string, mu *sync.M
 	defer mu.Unlock()
 	s, exists := sessions[id]
 	if exists && len(s.peers) == 0 {
+		closeSession(s.notifiers, s.peerCancels)
 		delete(sessions, id)
 		fmt.Printf("Session %v expired (no peers joined)\n", id)
 	}
 }
 
-func peerTTLWatcher(sessions map[string]Session, sessionId, udpAddr string, mu *sync.Mutex) {
-	time.Sleep(peerTTL)
+func peerTTLWatcher(sessions map[string]Session, sessionId, udpAddr string, mu *sync.Mutex, ctx context.Context) {
+	select {
+	case <-time.After(peerTTL):
+	case <-ctx.Done():
+		return
+	}
 	mu.Lock()
 	defer mu.Unlock()
 	s, exists := sessions[sessionId]
@@ -372,7 +420,9 @@ func peerTTLWatcher(sessions map[string]Session, sessionId, udpAddr string, mu *
 			break
 		}
 	}
+	delete(s.peerCancels, udpAddr)
 	if len(s.peers) == 0 {
+		closeSession(s.notifiers, s.peerCancels)
 		delete(sessions, sessionId)
 		fmt.Printf("Session %v deleted (empty after peer TTL)\n", sessionId)
 	} else {
@@ -380,8 +430,12 @@ func peerTTLWatcher(sessions map[string]Session, sessionId, udpAddr string, mu *
 	}
 }
 
-func secretPeerTTLWatcher(sessions map[string]SecretSession, sessionId, udpAddr string, mu *sync.Mutex) {
-	time.Sleep(peerTTL)
+func secretPeerTTLWatcher(sessions map[string]SecretSession, sessionId, udpAddr string, mu *sync.Mutex, ctx context.Context) {
+	select {
+	case <-time.After(peerTTL):
+	case <-ctx.Done():
+		return
+	}
 	mu.Lock()
 	defer mu.Unlock()
 	s, exists := sessions[sessionId]
@@ -395,7 +449,9 @@ func secretPeerTTLWatcher(sessions map[string]SecretSession, sessionId, udpAddr 
 			break
 		}
 	}
+	delete(s.peerCancels, udpAddr)
 	if len(s.peers) == 0 {
+		closeSession(s.notifiers, s.peerCancels)
 		delete(sessions, sessionId)
 		fmt.Printf("Session %v deleted (empty after peer TTL)\n", sessionId)
 	} else {
