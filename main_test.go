@@ -97,6 +97,68 @@ func TestStreamReturnsPubKey(t *testing.T) {
 	}
 }
 
+// TestStreamPasswordViaAuthHeader verifies the password SSE stream authenticates
+// via the Authorization header (not the query string): the correct Bearer token is
+// accepted and a wrong one is rejected with 401.
+func TestStreamPasswordViaAuthHeader(t *testing.T) {
+	srv := httptest.NewServer(newRouter())
+	defer srv.Close()
+
+	const password = "hunter2-correct"
+	const pubA = "YXV0aC1oZWFkZXItcm91bmQtdHJpcC10ZXN0LTAwMDAwMDA9"
+
+	// Create a password session and join it as peer A.
+	post(t, srv.URL+"/create_session", map[string]string{"id": "auth-sess", "password": password})
+	post(t, srv.URL+"/join_session/auth-sess", map[string]string{
+		"udp_addr": "203.0.113.9:40009",
+		"pub_key":  pubA,
+		"password": password,
+	})
+
+	// Wrong Bearer token → 401.
+	reqBad, _ := http.NewRequest("GET", srv.URL+"/join_session/auth-sess/stream?udp_addr=203.0.113.10:40010", nil)
+	reqBad.Header.Set("Authorization", "Bearer wrong-password")
+	respBad, err := http.DefaultClient.Do(reqBad)
+	if err != nil {
+		t.Fatalf("bad-auth request: %v", err)
+	}
+	respBad.Body.Close()
+	if respBad.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("wrong password: status = %d, want 401", respBad.StatusCode)
+	}
+
+	// Correct Bearer token → stream delivers peer A (with its pubkey).
+	reqOK, _ := http.NewRequest("GET", srv.URL+"/join_session/auth-sess/stream?udp_addr=203.0.113.10:40010", nil)
+	reqOK.Header.Set("Authorization", "Bearer "+password)
+	respOK, err := http.DefaultClient.Do(reqOK)
+	if err != nil {
+		t.Fatalf("good-auth request: %v", err)
+	}
+	defer respOK.Body.Close()
+	if respOK.StatusCode != http.StatusOK {
+		t.Fatalf("correct password: status = %d, want 200", respOK.StatusCode)
+	}
+
+	got := make(chan string, 1)
+	go func() {
+		scanner := bufio.NewScanner(respOK.Body)
+		for scanner.Scan() {
+			if data, ok := strings.CutPrefix(scanner.Text(), "data:"); ok {
+				got <- strings.TrimSpace(data)
+				return
+			}
+		}
+	}()
+	select {
+	case data := <-got:
+		if !strings.Contains(data, pubA) {
+			t.Fatalf("stream event %q missing pubkey %q", data, pubA)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("authenticated stream delivered no peer")
+	}
+}
+
 func post(t *testing.T, url string, body map[string]string) []byte {
 	t.Helper()
 	b, _ := json.Marshal(body)

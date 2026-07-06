@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"strings"
 	"sync"
 	"time"
 
@@ -38,6 +39,17 @@ type SecretSession struct {
 var Version = "dev"
 
 const peerTTL = 10 * time.Minute
+
+// bearerToken extracts the credential from an "Authorization: Bearer <token>"
+// header. The scheme prefix is optional and case-insensitive; if absent, the
+// whole header value is treated as the token.
+func bearerToken(header string) string {
+	header = strings.TrimSpace(header)
+	if len(header) >= 7 && strings.EqualFold(header[:7], "Bearer ") {
+		return strings.TrimSpace(header[7:])
+	}
+	return header
+}
 
 func removeNotifier(notifiers []chan Peer, ch chan Peer) []chan Peer {
 	for i, n := range notifiers {
@@ -304,7 +316,9 @@ func newRouter() *gin.Engine {
 		c.Header("Connection", "keep-alive")
 		c.Header("X-Accel-Buffering", "no")
 		sessionId := c.Param("id")
-		password := c.Query("password")
+		// The password is read from the Authorization header (Bearer <password>),
+		// never from the query string, so it does not leak into access logs/proxies.
+		password := bearerToken(c.GetHeader("Authorization"))
 		myAddr := c.Query("udp_addr")
 
 		mu.Lock()

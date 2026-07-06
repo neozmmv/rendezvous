@@ -177,6 +177,23 @@ Joins a password-protected session. Works the same as `/session/:id` but require
 
 ---
 
+### `GET /join_session/:id/stream`
+
+Server-Sent Events stream of peers for a password session. The password is supplied
+in the **`Authorization` header** (`Authorization: Bearer <password>`), never in the
+query string, so it does not leak into access logs or proxies. A wrong or missing
+token returns `401`.
+
+```
+GET /join_session/my-network/stream?udp_addr=191.176.32.57:51740
+Authorization: Bearer <password>
+```
+
+Each event is a `peer` with the same `{ip, local_addr, pub_key}` shape shown above.
+The password-less variant `GET /session/:id/stream` takes no `Authorization` header.
+
+---
+
 ## Client
 
 The client handles everything automatically: STUN discovery, signaling, hole punching, keepalive, and disconnect detection.
