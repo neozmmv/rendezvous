@@ -13,6 +13,11 @@ import (
 type Peer struct {
 	IP        string `json:"ip"`
 	LocalAddr string `json:"local_addr"`
+	// PubKey is the peer's base64-encoded Noise static public key. The rendezvous
+	// is a trusted, TLS-fronted anchor of identity, so it distributes each member's
+	// static pubkey alongside its address. The key is public by definition; only its
+	// integrity in transit matters, which TLS provides.
+	PubKey string `json:"pub_key"`
 }
 
 type Session struct {
@@ -55,6 +60,14 @@ func closeSession(notifiers []chan Peer, cancels map[string]context.CancelFunc) 
 }
 
 func main() {
+	r := newRouter()
+	fmt.Println("Server: http://localhost:8000")
+	r.Run(":8000")
+}
+
+// newRouter builds the gin engine with all routes and the in-memory session
+// stores. Extracted from main so tests can exercise the real handlers.
+func newRouter() *gin.Engine {
 	gin.SetMode(gin.ReleaseMode)
 	r := gin.Default()
 	r.Use(RateLimitMiddleware(NewIPRateLimiter(2, 5)))
@@ -67,6 +80,7 @@ func main() {
 		var body struct {
 			UdpAddr   string `json:"udp_addr"`
 			LocalAddr string `json:"local_addr"`
+			PubKey    string `json:"pub_key"`
 		}
 		sessionId := c.Param("id")
 		if err := c.ShouldBindJSON(&body); err != nil || body.UdpAddr == "" {
@@ -89,7 +103,7 @@ func main() {
 				existingPeers = append(existingPeers, p)
 			}
 		}
-		newPeer := Peer{IP: body.UdpAddr, LocalAddr: body.LocalAddr}
+		newPeer := Peer{IP: body.UdpAddr, LocalAddr: body.LocalAddr, PubKey: body.PubKey}
 		for _, ch := range session.notifiers {
 			select {
 			case ch <- newPeer:
@@ -230,6 +244,7 @@ func main() {
 			Password  string `json:"password"`
 			UdpAddr   string `json:"udp_addr"`
 			LocalAddr string `json:"local_addr"`
+			PubKey    string `json:"pub_key"`
 		}
 		sessionId := c.Param("id")
 		if err := c.ShouldBindJSON(&body); err != nil || body.UdpAddr == "" || body.Password == "" {
@@ -267,7 +282,7 @@ func main() {
 			c.JSON(400, gin.H{"error": "session is full"})
 			return
 		}
-		newPeer := Peer{IP: body.UdpAddr, LocalAddr: body.LocalAddr}
+		newPeer := Peer{IP: body.UdpAddr, LocalAddr: body.LocalAddr, PubKey: body.PubKey}
 		for _, ch := range secretSession.notifiers {
 			select {
 			case ch <- newPeer:
@@ -385,8 +400,7 @@ func main() {
 		})
 	})
 
-	fmt.Println("Server: http://localhost:8000")
-	r.Run(":8000")
+	return r
 }
 
 func killSessionWatcher(sessions map[string]SecretSession, id string, mu *sync.Mutex) {

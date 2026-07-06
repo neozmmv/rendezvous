@@ -91,16 +91,30 @@ Simple session without a password. The first peer to arrive waits; when the seco
 **Request:**
 ```json
 {
-  "udp_addr": "191.176.32.57:51740"
+  "udp_addr": "191.176.32.57:51740",
+  "local_addr": "192.168.1.20:51740",
+  "pub_key": "base64-encoded 32-byte Noise static public key"
 }
 ```
 
-**Response (both peers):**
+**Response (list of peers already present):**
 ```json
 {
-  "peer": "201.x.x.x:55321"
+  "peers": [
+    {
+      "ip": "201.x.x.x:55321",
+      "local_addr": "192.168.1.31:55321",
+      "pub_key": "base64-encoded 32-byte Noise static public key"
+    }
+  ]
 }
 ```
+
+> `pub_key` carries each peer's Noise static public key. It is distributed by the
+> rendezvous (a trusted, TLS-fronted identity anchor) so that peers can pin each
+> other's key before the Noise IKpsk2 handshake. The key is public by definition —
+> only its integrity in transit matters, which TLS provides. The same `pub_key`
+> field is included in every `peer` event emitted by the SSE `.../stream` endpoints.
 
 ---
 
@@ -135,14 +149,22 @@ Joins a password-protected session. Works the same as `/session/:id` but require
 ```json
 {
   "udp_addr": "191.176.32.57:51740",
-  "password": "secret"
+  "local_addr": "192.168.1.20:51740",
+  "password": "secret",
+  "pub_key": "base64-encoded 32-byte Noise static public key"
 }
 ```
 
-**Response (both peers):**
+**Response (list of peers already present):**
 ```json
 {
-  "peer": "201.x.x.x:55321"
+  "peers": [
+    {
+      "ip": "201.x.x.x:55321",
+      "local_addr": "192.168.1.31:55321",
+      "pub_key": "base64-encoded 32-byte Noise static public key"
+    }
+  ]
 }
 ```
 
