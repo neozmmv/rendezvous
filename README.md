@@ -1,10 +1,10 @@
 # Rendezvous
 
-A lightweight, self-hostable signaling server for establishing direct P2P connections via UDP hole punching.
+A lightweight, self-hostable **signaling server** for establishing direct P2P connections via UDP hole punching (blindspot).
 
-> **The server is only used to exchange UDP addresses between peers. Once the connection is established, all traffic flows directly between peers — the server is no longer involved.**
+> **The server is only used to exchange UDP addresses (and pin static public keys) between peers. Once the connection is established, all traffic flows directly between peers — the server is no longer involved.**
 
-> ⚠️ **This project is a work in progress. The P2P connection is currently unencrypted. See the [roadmap](#roadmap) below.**
+Rendezvous is the signaling companion to **[Blindspot](https://github.com/neozmmv/blindspot)** — a P2P VPN and networking toolkit built on UDP hole punching with end-to-end encryption (Noise `IKpsk2`, the same cipher suite as WireGuard). Blindspot handles the encrypted transport; Rendezvous only brokers the initial peer discovery.
 
 A public instance is available at `https://rendezvous.enzogp.dev`. You can also self-host your own instance.
 
@@ -17,25 +17,28 @@ Peer A                  Rendezvous Server                 Peer B
   |                           |                              |
   |-- discovers public IP via STUN (Google)                 |
   |-- POST /session/abc ----->|                              |
-  |   (waits...)              |<----- POST /session/abc -----|
+  |   (opens SSE stream)      |<----- POST /session/abc -----|
   |                           |    (server crosses addresses)|
-  |<-- peer B's address ------|------ peer A's address ----->|
+  |<-- peer B's addr + key ---|------ peer A's addr + key -->|
   |                           |                              |
   |<============= UDP hole punching (direct) ===============>|
   |                           |                              |
-  |<============= direct P2P connection ===================>|
+  |<===== encrypted P2P connection (Noise, in Blindspot) ===>|
 ```
 
 1. Each peer discovers its public IP:port via STUN
-2. Both peers register their UDP address on the rendezvous server using the same session ID
-3. The server exchanges their addresses and both peers start hole punching simultaneously
-4. Once the connection is established, the server is no longer needed
+2. Both peers register their UDP address (and Noise static public key) on the rendezvous server using the same session ID
+3. The server exchanges their addresses and each peer learns the other's key and address; both start hole punching simultaneously
+4. Peers open a Server-Sent Events stream to be notified of members that join later
+5. Once the connection is established, the server is no longer needed
+
+Because the rendezvous is fronted by TLS, it acts as a trusted anchor of identity: it distributes each peer's **public** key so peers can pin each other before the Noise handshake, defeating on-path impersonation. The key is public by definition — only its integrity in transit matters, which TLS provides.
 
 ---
 
 ## Self-hosting
 
-You can run your own rendezvous server. Pre-built binaries for the server are available on the [releases page](https://github.com/neozmmv/rendezvous/releases) — no Docker required.
+You can run your own rendezvous server. Pre-built binaries for Linux (amd64/arm64), Windows, and macOS (amd64/arm64) are available on the [releases page](https://github.com/neozmmv/rendezvous/releases) — no Docker required.
 
 ### Option 1 — Binary + Cloudflare Tunnel (recommended)
 
@@ -43,8 +46,8 @@ No public IP or port forwarding required.
 
 ```bash
 # download the server binary for your platform from the releases page
-chmod +x rendezvous_linux_amd64
-./rendezvous_linux_amd64
+chmod +x rendezvous-linux-amd64
+./rendezvous-linux-amd64   # listens on :8000
 
 # in another terminal, expose it via Cloudflare Tunnel
 cloudflared tunnel --url http://localhost:8000
@@ -54,12 +57,12 @@ Cloudflare will print a public URL — use that as your hostname in the client.
 
 ### Option 2 — Docker + Cloudflare Tunnel
 
-### Requirements
+**Requirements**
 
 - Docker + Docker Compose
 - [cloudflared](https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/downloads/)
 
-### docker-compose.yml
+**docker-compose.yml**
 
 ```yaml
 services:
@@ -80,13 +83,24 @@ docker compose up -d --build
 
 Cloudflare will print a public URL in the logs — use that as your hostname.
 
+### Build from source
+
+```bash
+git clone https://github.com/neozmmv/rendezvous
+cd rendezvous
+go build -o rendezvous .
+./rendezvous
+```
+
 ---
 
 ## API
 
+The server keeps all session state in memory. Requests are rate limited per client IP.
+
 ### `POST /session/:id`
 
-Simple session without a password. The first peer to arrive waits; when the second peer registers, both receive each other's address simultaneously.
+Simple session without a password. Registering returns the peers already present; the same call refreshes the caller's presence (heartbeat) and resets its TTL.
 
 **Request:**
 ```json
@@ -97,7 +111,7 @@ Simple session without a password. The first peer to arrive waits; when the seco
 }
 ```
 
-**Response (list of peers already present):**
+**Response (peers already present, excluding the caller):**
 ```json
 {
   "peers": [
@@ -110,11 +124,30 @@ Simple session without a password. The first peer to arrive waits; when the seco
 }
 ```
 
-> `pub_key` carries each peer's Noise static public key. It is distributed by the
-> rendezvous (a trusted, TLS-fronted identity anchor) so that peers can pin each
-> other's key before the Noise IKpsk2 handshake. The key is public by definition —
-> only its integrity in transit matters, which TLS provides. The same `pub_key`
-> field is included in every `peer` event emitted by the SSE `.../stream` endpoints.
+> `pub_key` carries each peer's Noise static public key. The same `{ip, local_addr, pub_key}` shape is emitted by every `peer` event on the SSE `.../stream` endpoints. `pub_key` is optional — plain hole-punching clients can omit it.
+
+---
+
+### `GET /session/:id/stream`
+
+Server-Sent Events stream of peers for a session. Emits a `peer` event (shape above) for each member already present and for every member that joins later. Sends a `: keepalive` comment every 30 seconds to keep proxies from closing the connection.
+
+```
+GET /session/my-session/stream?udp_addr=191.176.32.57:51740
+```
+
+`udp_addr` identifies the caller so it isn't streamed its own entry. Returns `404` if the session does not exist.
+
+---
+
+### `POST /session/:id/leave`
+
+Removes the caller from the session. When the last peer leaves, the session is deleted.
+
+**Request:**
+```json
+{ "udp_addr": "191.176.32.57:51740" }
+```
 
 ---
 
@@ -126,24 +159,23 @@ Creates a password-protected session. Must be called before peers can join.
 ```json
 {
   "id": "my-network",
-  "password": "secret"
+  "password": "secret",
+  "max_peers": 4
 }
 ```
 
 **Response:**
 ```json
-{
-  "message": "session created"
-}
+{ "message": "session created" }
 ```
 
-> Sessions expire automatically after 5 minutes if no peers join.
+> `max_peers` is optional; `0` (or omitted) means unlimited. A newly created session expires automatically after 5 minutes if no peers join.
 
 ---
 
 ### `POST /join_session/:id`
 
-Joins a password-protected session. Works the same as `/session/:id` but requires a password. The first peer waits; the second peer triggers the exchange.
+Joins a password-protected session. Works like `/session/:id` but requires the password, and honors the session's `max_peers` limit.
 
 **Request:**
 ```json
@@ -155,33 +187,22 @@ Joins a password-protected session. Works the same as `/session/:id` but require
 }
 ```
 
-**Response (list of peers already present):**
-```json
-{
-  "peers": [
-    {
-      "ip": "201.x.x.x:55321",
-      "local_addr": "192.168.1.31:55321",
-      "pub_key": "base64-encoded 32-byte Noise static public key"
-    }
-  ]
-}
-```
+**Response:** same `{ "peers": [...] }` shape as `/session/:id`.
 
 **Error responses:**
 ```json
 { "error": "session not found" }
 { "error": "incorrect password" }
-{ "error": "session already full" }
+{ "error": "session is full" }
 ```
 
 ---
 
 ### `GET /join_session/:id/stream`
 
-Server-Sent Events stream of peers for a password session. The password is supplied
-in the **`Authorization` header** (`Authorization: Bearer <password>`), never in the
-query string, so it does not leak into access logs or proxies. A wrong or missing
+SSE stream of peers for a password session. The password is supplied in the
+**`Authorization` header** (`Authorization: Bearer <password>`), never in the query
+string, so it does not leak into access logs or proxies. A wrong or missing
 token returns `401`.
 
 ```
@@ -189,69 +210,47 @@ GET /join_session/my-network/stream?udp_addr=191.176.32.57:51740
 Authorization: Bearer <password>
 ```
 
-Each event is a `peer` with the same `{ip, local_addr, pub_key}` shape shown above.
-The password-less variant `GET /session/:id/stream` takes no `Authorization` header.
+---
+
+### `POST /join_session/:id/leave`
+
+Removes the caller from a password session. When the last peer leaves, the session is deleted.
+
+**Request:**
+```json
+{ "udp_addr": "191.176.32.57:51740" }
+```
+
+---
+
+### `GET /version` and `GET /`
+
+`GET /version` returns `{ "version": "<build version>" }`. `GET /` returns a welcome
+message with the caller's `clientIP` and the server `version`. The version is baked
+in at build time via `-ldflags "-X main.Version=..."`.
 
 ---
 
 ## Client
 
-The client handles everything automatically: STUN discovery, signaling, hole punching, keepalive, and disconnect detection.
+The reference client is **[Blindspot](https://github.com/neozmmv/blindspot)**, which drives
+the full flow against a rendezvous server: STUN discovery, signaling, key pinning,
+hole punching, the Noise `IKpsk2` handshake, encrypted transport, keepalive, and
+disconnect detection. Point it at `https://rendezvous.enzogp.dev` or your own instance.
 
-### Download
-
-Pre-built binaries for Windows, Linux, and Linux ARM64 are available on the [releases page](https://github.com/neozmmv/rendezvous/releases). No installation required — just download and run.
-
-### Usage
-
-```
-Enter hostname (blank for default): 
-Create or join session? (c/j): j
-Enter session: my-session
-Does the session require a password? (y/n): n
-Public addr: 191.176.32.57:51740
-Listening on [::]:51740
-Peer address: 201.x.x.x:55321
-```
-
-If you leave the hostname blank, it defaults to `https://rendezvous.enzogp.dev`.
-
-### Session types
-
-**Simple session (no password):**
-- Both peers enter the same session ID
-- No need to create it first — the first peer to arrive waits automatically
-
-**Password-protected session:**
-- One peer creates the session with `c` (create) and sets a password
-- The other peer joins with `j` (join) and enters the same password
-- Share the session ID and password out of band (e.g. via chat)
-
-### Build from source
-
-```bash
-git clone https://github.com/neozmmv/rendezvous
-cd rendezvous/client
-
-# Linux
-go build -o p2p_client .
-
-# Windows
-GOOS=windows GOARCH=amd64 go build -o p2p_client.exe .
-
-# Linux ARM64 (e.g. Oracle VPS)
-GOOS=linux GOARCH=arm64 go build -o p2p_client_arm64 .
-```
+The `client/` directory in this repo is a minimal, unencrypted demo used during early
+development. It is not published in releases and is not kept in lockstep with the
+current server API — treat it as a reference for the raw hole-punching mechanics only.
 
 ---
 
 ## Notes
 
-- The rendezvous server only sees UDP addresses during the handshake — it never touches the actual P2P traffic
+- The rendezvous server only sees UDP addresses and public keys during the handshake — it never touches the actual P2P traffic
 - Hole punching works with most residential NATs including CGNAT
 - If both peers are behind symmetric NAT, hole punching may fail — a relay would be required as fallback
-- The connection uses keepalive packets every 10 seconds to keep the NAT entry alive
-- If no keepalive is received for 30 seconds, the client assumes the peer disconnected and exits
+- Sessions live entirely in memory: a server restart drops all sessions
+- A peer that stops re-registering is evicted after a 10-minute TTL; empty sessions are deleted
 
 ---
 
@@ -259,13 +258,12 @@ GOOS=linux GOARCH=arm64 go build -o p2p_client_arm64 .
 
 - [x] UDP hole punching
 - [x] STUN-based public address discovery
-- [x] Long polling signaling server
+- [x] Signaling server (register + Server-Sent Events streaming)
 - [x] Password-protected sessions
-- [x] Keepalive to maintain NAT entries
-- [x] Disconnect detection
-- [x] Self-hostable server binary
-- [ ] End-to-end encryption (X25519 + AES-GCM)
-- [ ] MITM protection via key fingerprint verification
-- [ ] Reliable delivery over UDP (ACK + retransmission)
-- [ ] Multi-peer mesh sessions
-- [ ] VPN mode via tun/tap interface
+- [x] Multi-peer sessions with `max_peers` limit
+- [x] Peer TTL and automatic session expiry
+- [x] Leave endpoints for clean teardown
+- [x] Per-IP rate limiting
+- [x] Static public key distribution for pinning (Noise handshake in Blindspot)
+- [x] Self-hostable server binaries (Linux, Windows, macOS)
+- [ ] Persistent session store (survive restarts)
